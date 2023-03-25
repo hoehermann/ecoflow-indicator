@@ -7,6 +7,7 @@
 import sys
 import threading
 import time
+import datetime
 import gattlib
 import gi
 gi.require_version("Gtk", "3.0")
@@ -54,37 +55,55 @@ def lookup_state(level: int):
 
 ecoflow_address = sys.argv[1]
 def on_update(info):
+    import pprint
+    pprint.pprint(info)
     state = lookup_state(info['battery_main_level'])
-    charging = ""
-    if (info['out_power'] < info['in_power']):
+    
+    # info['out_power'] < info['in_power'] these are unreliable
+    charging = isinstance(info['battery_remain_charge'], datetime.timedelta)
+    discharging = isinstance(info['battery_remain_discharge'], datetime.timedelta)
+    if (charging and discharging):
+        discharging = info['battery_remain_discharge'] < info['battery_remain_charge']
+        charging = info['battery_remain_charge'] < info['battery_remain_discharge']
+    if (charging):
         charging = "-charging"
+    else:
+        charging = ""
         
     indicator_widget.set_icon_full(f"battery-{state}{charging}{symbolic}", f"Battery at {info['battery_main_level']}%")
-    indicator_widget.set_title(
-        f"{info['out_power']}W total output"+
-        f"\n{info['ac_out_power']}W AC output"+
-        f"\n{info['dc_out_power']}W DC output"+
-        f"\n{info['in_power']}W input"+
-        (f"\n{info['battery_remain_discharge']*(100-info['battery_level_min'])/100} remaining" if info['out_power'] > info['in_power'] else "")
-    )
+    description = [
+        #f"{info['battery_out_power']}W battery output", # always zero
+        #f"{info['battery_in_power']}W battery input", # always zero
+        #f"{info['out_power']}W total output", # updates only sometimes
+        f"{info['ac_out_power']}W AC output",
+        f"{info['typec_out1_power']+info['typec_out2_power']}W USB-C output",
+        f"{info['usb_out1_power']+info['usb_out2_power']+info['usbqc_out1_power']+info['usbqc_out2_power']}W USB-A output",
+        f"{info['in_power']}W input",
+        f"{info['battery_cycles']} cycles",
+        f"{info['battery_capacity_remain']} mAh ({int(100*info['battery_capacity_remain']/(info['battery_capacity_design']+1))}%) stored",
+        ]
+    if (discharging):
+        description.append(f"{info['battery_remain_discharge']*(100-info['battery_level_min'])/100} remaining until {info['battery_level_min']}%")
+    if (charging):
+        description.append(f"{info['battery_remain_charge']} remaining until 100 %")
+    indicator_widget.set_title('\n'.join(description))
 
-requester = Requester(ecoflow_address, on_update)
 main_terminated = threading.Event()
 
 def connecter(main_terminated:threading.Event):
-    while not main_terminated.is_set():
-        if (requester.is_connected()):
-            time.sleep(10.0)
-        else:
-            try:
+    requester = None
+    while (not main_terminated.is_set() and (requester is None or not requester.is_connected())):
+        try:
+            requester = Requester(ecoflow_address, on_update)
+            if (not requester.is_connected()):
                 print("Connecting...")
                 requester.connect()
-            except gattlib.BTIOException as e:
-                indicator_widget.set_icon_full(f"battery-missing{symbolic}", "")
-                indicator_widget.set_title("No bluetooth connection")
-                print(e)
-                time.sleep(1.0)
-                print("Retrying...")
+                print("Connected.")
+        except gattlib.BTIOException as e:
+            indicator_widget.set_icon_full(f"battery-missing{symbolic}", "No bluetooth connection")
+            indicator_widget.set_title(str(e))
+            time.sleep(1.0)
+            print("Retrying...")
 threading.Thread(target=connecter, name="connecter", args=(main_terminated,), daemon=True).start()
 
 Gtk.main()
